@@ -4,4 +4,4 @@ __pycache__/
 .ruff_cache/
 .pyright/
 *.pyc
-
+notes_repo/
