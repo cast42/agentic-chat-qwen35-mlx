@@ -1,0 +1,34 @@
+[project]
+name = "agentic-chat-qwen35-mlx"
+version = "0.1.0"
+description = "Local agentic RAG chatbot using Pydantic-AI and MLX"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic-ai>=0.8.1",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.390",
+    "pytest>=8.3.5",
+    "ruff>=0.12.0",
+]
+
+[project.scripts]
+rag-agent = "rag_agent.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rag_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
