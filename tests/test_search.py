@@ -39,6 +39,47 @@ def test_rg_search_runs_command_and_parses_hits(monkeypatch, tmp_path: Path) -> 
     assert hits[0].snippet == "agentic systems"
 
 
+def test_rg_search_falls_back_to_keywords_for_natural_language_query(
+    monkeypatch, tmp_path: Path
+) -> None:
+    notes = tmp_path / "notes_repo"
+    notes.mkdir()
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(command)
+        query = command[-2]
+        if query == "what can you say about microsoft":
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="",
+                stderr="",
+            )
+        if query == "microsoft":
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="topics/microsoft.md:7:Copilot notes\n",
+                stderr="",
+            )
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=1,
+            stdout="",
+            stderr="",
+        )
+
+    monkeypatch.setattr("rag_agent.tools.search.subprocess.run", fake_run)
+    ctx = cast(RunContext[RagDeps], FakeContext(deps=RagDeps(notes_path=notes)))
+    hits = rg_search(ctx, query="what can you say about microsoft")
+
+    assert calls[0][-2] == "what can you say about microsoft"
+    assert any(call[-2] == "microsoft" for call in calls[1:])
+    assert hits[0].citation == "topics/microsoft.md:7"
+
+
 def test_semantic_search_parses_qmd_output(monkeypatch, tmp_path: Path) -> None:
     notes = tmp_path / "notes_repo"
     notes.mkdir()

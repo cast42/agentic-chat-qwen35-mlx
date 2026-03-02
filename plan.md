@@ -7,7 +7,7 @@ development.
 
 Knowledge source: https://github.com/cast42/notes
 
-The system runs locally using a Qwen 3.5 MLX model and tool-driven
+The system runs locally using a Qwen 3 MLX model and tool-driven
 retrieval.
 
 ------------------------------------------------------------------------
@@ -33,7 +33,7 @@ Do NOT invent a new structure. Extend the boilerplate.
 
 ## Model
 
-Qwen3.5-35B-A3B (MLX 4bit)
+Qwen3-4B-Thinking-2507 (MLX 4bit)
 
 ------------------------------------------------------------------------
 

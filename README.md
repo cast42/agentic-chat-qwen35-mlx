@@ -28,11 +28,12 @@ Minimal local RAG assistant that searches markdown notes with tools and cites so
 just run "What did I write about agentic coding?"
 ```
 
-Environment variables for local MLX/OpenAI-compatible serving:
+Environment variables for local MLX inference:
 
-- `RAG_OPENAI_BASE_URL` (default: `http://127.0.0.1:8080/v1`)
-- `RAG_OPENAI_API_KEY` (default: `mlx-local`)
-- `RAG_MODEL` (default: `qwen3.5-35b-a3b`)
+- `RAG_MODEL` (default: `mlx-community/Qwen3-4B-Thinking-2507-4bit`)
+- `RAG_MAX_TOKENS` (default: `2048`)
+
+No OpenAI-compatible server is required. The first run may download model files.
 
 ## Quality
 

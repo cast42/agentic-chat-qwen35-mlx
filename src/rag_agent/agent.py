@@ -1,41 +1,85 @@
 from __future__ import annotations
 
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.openai import OpenAIModel
-from pydantic_ai.providers.openai import OpenAIProvider
+from pathlib import Path
+from typing import TYPE_CHECKING, cast
+
+from pydantic_ai import Agent
 
 from rag_agent.deps import RagDeps
 from rag_agent.models import SearchHit
-from rag_agent.tools import read_file, rg_search, semantic_search
 from rag_agent.tools.search import citations_for_hits
 
-DEFAULT_MODEL = "qwen3.5-35b-a3b"
-DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1"
-DEFAULT_API_KEY = "mlx-local"
+if TYPE_CHECKING:
+    from mlx.nn.layers.base import Module as MlxModule
+    from pydantic_ai.models import Model
+    from transformers import PreTrainedTokenizer
+
+# DEFAULT_MODEL = "mlx-community/Qwen3-4B-Thinking-2507-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen3.5-9B-4bit"
+_TOKENIZER_CONFIG = {"eos_token": "<|endoftext|>", "trust_remote_code": True}
 
 SYSTEM_PROMPT = """
 You are a local agentic RAG assistant over a markdown notes repository.
 
 Rules:
-- Always run a search tool before answering.
-- Prefer semantic_search for conceptual questions.
-- Prefer rg_search for exact terms, names, and quotes.
-- Read relevant files with read_file before writing the final answer.
-- Include citations in the final answer using `path:line` format.
-- If evidence is weak, perform another search before finalizing.
+- Use retrieved repository context included with the user message as primary evidence.
+- Include citations in the final answer using `path:line` format whenever evidence exists.
+- If the provided context is insufficient, say so explicitly.
+- Respond with only the final answer, never your reasoning process or planning steps.
 """.strip()
 
 
-def _tool_payload(hits: list[SearchHit]) -> list[dict[str, str | int]]:
-    return [
-        {
-            "path": str(hit.path),
-            "line": hit.line,
-            "snippet": hit.snippet,
-            "citation": hit.citation,
-        }
-        for hit in hits
-    ]
+def _load_mlx_components(model: str) -> tuple[MlxModule, PreTrainedTokenizer]:
+    from mlx_lm import load
+
+    load_result = load(
+        model,
+        tokenizer_config=_TOKENIZER_CONFIG,
+        return_config=True,
+    )
+    mlx_model, tokenizer, _config = cast(
+        "tuple[MlxModule, PreTrainedTokenizer, dict[str, object]]",
+        load_result,
+    )
+    return mlx_model, tokenizer
+
+
+def _load_mlx_components_relaxed(model: str) -> tuple[MlxModule, PreTrainedTokenizer]:
+    from huggingface_hub import snapshot_download
+    from mlx_lm.utils import load_model, load_tokenizer
+
+    model_path = Path(model)
+    if not model_path.exists():
+        model_path = Path(snapshot_download(model))
+
+    mlx_model, config = load_model(model_path=model_path, strict=False)
+    tokenizer = load_tokenizer(
+        model_path,
+        tokenizer_config_extra=_TOKENIZER_CONFIG,
+        eos_token_ids=config.get("eos_token_id", None),
+    )
+    return cast("tuple[MlxModule, PreTrainedTokenizer]", (mlx_model, tokenizer))
+
+
+def _build_outlines_model(mlx_model: MlxModule, tokenizer: PreTrainedTokenizer) -> Model:
+    from pydantic_ai.models.outlines import OutlinesModel
+
+    return OutlinesModel.from_mlxlm(mlx_model, tokenizer)
+
+
+def _build_local_mlx_model(model: str) -> Model:
+    try:
+        mlx_model, tokenizer = _load_mlx_components(model)
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing MLX dependencies. Run `just sync` to install `mlx-lm` and `outlines`."
+        ) from exc
+    except ValueError as exc:
+        if "parameters not in model" not in str(exc):
+            raise
+        mlx_model, tokenizer = _load_mlx_components_relaxed(model)
+
+    return _build_outlines_model(mlx_model, tokenizer)
 
 
 def render_citations(hits: list[SearchHit]) -> str:
@@ -46,47 +90,9 @@ def render_citations(hits: list[SearchHit]) -> str:
     return f"\n\nSources:\n{bullet_list}"
 
 
-def build_agent(
-    model: str = DEFAULT_MODEL,
-    base_url: str = DEFAULT_BASE_URL,
-    api_key: str = DEFAULT_API_KEY,
-) -> Agent[RagDeps, str]:
-    llm = OpenAIModel(
-        model,
-        provider=OpenAIProvider(
-            base_url=base_url,
-            api_key=api_key,
-        ),
-    )
-
-    agent = Agent(
-        model=llm,
+def build_agent(model: str = DEFAULT_MODEL) -> Agent[RagDeps, str]:
+    return Agent(
+        model=_build_local_mlx_model(model),
         deps_type=RagDeps,
         system_prompt=SYSTEM_PROMPT,
     )
-
-    @agent.tool
-    def semantic_search_tool(
-        ctx: RunContext[RagDeps],
-        query: str,
-        max_results: int = 8,
-    ) -> list[dict[str, str | int]]:
-        return _tool_payload(semantic_search(ctx, query=query, max_results=max_results))
-
-    @agent.tool
-    def rg_search_tool(
-        ctx: RunContext[RagDeps],
-        query: str,
-        max_results: int = 8,
-    ) -> list[dict[str, str | int]]:
-        return _tool_payload(rg_search(ctx, query=query, max_results=max_results))
-
-    @agent.tool
-    def read_file_tool(
-        ctx: RunContext[RagDeps],
-        file_path: str,
-        max_chars: int = 12_000,
-    ) -> str:
-        return read_file(ctx, file_path=file_path, max_chars=max_chars)
-
-    return agent
