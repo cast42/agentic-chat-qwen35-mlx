@@ -14,8 +14,7 @@ if TYPE_CHECKING:
     from pydantic_ai.models import Model
     from transformers import PreTrainedTokenizer
 
-# DEFAULT_MODEL = "mlx-community/Qwen3-4B-Thinking-2507-4bit"
-DEFAULT_MODEL = "mlx-community/Qwen3.5-9B-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen3-4B-Thinking-2507-4bit"
 _TOKENIZER_CONFIG = {"eos_token": "<|endoftext|>", "trust_remote_code": True}
 
 SYSTEM_PROMPT = """

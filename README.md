@@ -22,6 +22,18 @@ Minimal local RAG assistant that searches markdown notes with tools and cites so
    git submodule add https://github.com/cast42/notes notes_repo
    ```
 
+## Check if the model runs
+
+```bash
+just run "Di una frase corta en espanol."
+```
+
+To test with the Qwen3.5 checkpoint specifically:
+
+```bash
+RAG_MODEL=mlx-community/Qwen3.5-9B-4bit just run "Di una frase corta en espanol."
+```
+
 ## Run
 
 ```bash
