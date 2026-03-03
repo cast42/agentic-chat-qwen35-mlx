@@ -5,9 +5,19 @@ from pathlib import Path
 import subprocess
 from typing import cast
 
+import pytest
+
 from rag_agent.context import RunContext
 from rag_agent.deps import RagDeps
-from rag_agent.tools.search import citations_for_hits, rg_search, semantic_search
+from rag_agent.models import SearchHit
+from rag_agent.tools.search import (
+    citations_for_hits,
+    qmd_get,
+    qmd_multi_get,
+    qmd_query,
+    qmd_search,
+    run_qmd_tool,
+)
 
 
 @dataclass
@@ -15,7 +25,7 @@ class FakeContext:
     deps: RagDeps
 
 
-def test_rg_search_runs_command_and_parses_hits(monkeypatch, tmp_path: Path) -> None:
+def test_qmd_query_runs_command(monkeypatch, tmp_path: Path) -> None:
     notes = tmp_path / "notes_repo"
     notes.mkdir()
 
@@ -32,16 +42,14 @@ def test_rg_search_runs_command_and_parses_hits(monkeypatch, tmp_path: Path) -> 
 
     monkeypatch.setattr("rag_agent.tools.search.subprocess.run", fake_run)
     ctx = cast(RunContext[RagDeps], FakeContext(deps=RagDeps(notes_path=notes)))
-    hits = rg_search(ctx, query="agentic")
 
-    assert calls[0][:2] == ["rg", "-n"]
-    assert hits[0].citation == "topic.md:3"
-    assert hits[0].snippet == "agentic systems"
+    output = qmd_query(ctx, question="agentic systems")
+
+    assert calls == [["qmd", "query", "agentic systems", "--collection", "notes"]]
+    assert output == "topic.md:3:agentic systems"
 
 
-def test_rg_search_falls_back_to_keywords_for_natural_language_query(
-    monkeypatch, tmp_path: Path
-) -> None:
+def test_qmd_search_runs_command(monkeypatch, tmp_path: Path) -> None:
     notes = tmp_path / "notes_repo"
     notes.mkdir()
 
@@ -49,70 +57,70 @@ def test_rg_search_falls_back_to_keywords_for_natural_language_query(
 
     def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(command)
-        query = command[-2]
-        if query == "what can you say about microsoft":
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=1,
-                stdout="",
-                stderr="",
-            )
-        if query == "microsoft":
-            return subprocess.CompletedProcess(
-                args=command,
-                returncode=0,
-                stdout="topics/microsoft.md:7:Copilot notes\n",
-                stderr="",
-            )
         return subprocess.CompletedProcess(
             args=command,
-            returncode=1,
-            stdout="",
+            returncode=0,
+            stdout="topic.md:11:bm25 match\n",
             stderr="",
         )
 
     monkeypatch.setattr("rag_agent.tools.search.subprocess.run", fake_run)
     ctx = cast(RunContext[RagDeps], FakeContext(deps=RagDeps(notes_path=notes)))
-    hits = rg_search(ctx, query="what can you say about microsoft")
 
-    assert calls[0][-2] == "what can you say about microsoft"
-    assert any(call[-2] == "microsoft" for call in calls[1:])
-    assert hits[0].citation == "topics/microsoft.md:7"
+    output = qmd_search(ctx, keywords="agentic")
+
+    assert calls == [["qmd", "search", "agentic", "--collection", "notes"]]
+    assert output == "topic.md:11:bm25 match"
 
 
-def test_semantic_search_parses_qmd_output(monkeypatch, tmp_path: Path) -> None:
+def test_qmd_multi_get_supports_line_limit(monkeypatch, tmp_path: Path) -> None:
+    notes = tmp_path / "notes_repo"
+    notes.mkdir()
+
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(command)
+        return subprocess.CompletedProcess(args=command, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("rag_agent.tools.search.subprocess.run", fake_run)
+    ctx = cast(RunContext[RagDeps], FakeContext(deps=RagDeps(notes_path=notes)))
+
+    output = qmd_multi_get(ctx, target="journals/2026-*.md", line_limit=40)
+
+    assert output == "ok"
+    assert calls == [
+        ["qmd", "multi-get", "journals/2026-*.md", "-l", "40", "--collection", "notes"]
+    ]
+
+
+def test_run_qmd_tool_blocks_line_limit_for_non_multi_get(tmp_path: Path) -> None:
+    notes = tmp_path / "notes_repo"
+    notes.mkdir()
+    ctx = cast(RunContext[RagDeps], FakeContext(deps=RagDeps(notes_path=notes)))
+
+    with pytest.raises(ValueError, match="line_limit"):
+        run_qmd_tool(ctx, command="query", argument="topic", line_limit=10)
+
+
+def test_qmd_get_raises_on_command_failure(monkeypatch, tmp_path: Path) -> None:
     notes = tmp_path / "notes_repo"
     notes.mkdir()
 
     def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="concepts/agents.md:8:Tool-driven retrieval\n",
-            stderr="",
-        )
+        return subprocess.CompletedProcess(args=command, returncode=2, stdout="", stderr="boom")
 
     monkeypatch.setattr("rag_agent.tools.search.subprocess.run", fake_run)
     ctx = cast(RunContext[RagDeps], FakeContext(deps=RagDeps(notes_path=notes)))
-    hits = semantic_search(ctx, query="retrieval")
 
-    assert hits[0].citation == "concepts/agents.md:8"
-    assert hits[0].snippet == "Tool-driven retrieval"
+    with pytest.raises(RuntimeError, match="boom"):
+        qmd_get(ctx, docid="#abc123")
 
 
-def test_citations_for_hits_deduplicates(monkeypatch, tmp_path: Path) -> None:
-    notes = tmp_path / "notes_repo"
-    notes.mkdir()
+def test_citations_for_hits_deduplicates() -> None:
+    hits = [
+        SearchHit(path=Path("topic.md"), line=2, snippet="alpha"),
+        SearchHit(path=Path("topic.md"), line=2, snippet="alpha again"),
+    ]
 
-    def fake_run(command, **kwargs):  # type: ignore[no-untyped-def]
-        return subprocess.CompletedProcess(
-            args=command,
-            returncode=0,
-            stdout="topic.md:2:alpha\ntopic.md:2:alpha\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr("rag_agent.tools.search.subprocess.run", fake_run)
-    ctx = cast(RunContext[RagDeps], FakeContext(deps=RagDeps(notes_path=notes)))
-    hits = rg_search(ctx, query="alpha")
     assert citations_for_hits(hits) == ["topic.md:2"]

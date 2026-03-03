@@ -8,33 +8,37 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from pydantic_ai import PromptedOutput
 from pydantic_ai.settings import ModelSettings
 
-from rag_agent.agent import (
-    DEFAULT_MODEL,
-    build_agent,
-    render_citations,
-)
+from rag_agent.agent import DEFAULT_MODEL, build_agent, build_planning_agent
 from rag_agent.context import RunContext
 from rag_agent.deps import RagDeps
-from rag_agent.models import SearchHit
-from rag_agent.tools import (
-    read_file,
-    rg_search,
-    semantic_search,
-)
+from rag_agent.tools.search import QMD_HELP, QmdCommand, run_qmd_tool
 
 DEFAULT_MAX_TOKENS = 65_536
-DEFAULT_MAX_RESULTS = 8
-DEFAULT_MAX_FILES = 4
-DEFAULT_FILE_CHARS = 3_000
+_MAX_TOOL_STEPS = 4
+_MAX_TOOL_OUTPUT_CHARS = 8_000
+_MAX_TOOL_PLANNING_TOKENS = 2_048
+_TOOL_OUTPUT_TRUNCATION_MARKER = "\n\n...[truncated]"
 _THINK_START_TAG = "<think>"
 _THINK_END_TAG = "</think>"
 
 
 @dataclass(frozen=True, slots=True)
-class _ContextProxy:
-    deps: RagDeps
+class _QmdToolResult:
+    command: QmdCommand
+    argument: str
+    line_limit: int | None
+    output: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolingComplete:
+    reason: str
+
+
+ToolingStep = _QmdToolResult | _ToolingComplete
 
 
 @dataclass(slots=True)
@@ -93,65 +97,127 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _dedupe_hits(hits: list[SearchHit]) -> list[SearchHit]:
-    deduped: list[SearchHit] = []
-    seen: set[str] = set()
-    for hit in hits:
-        citation = hit.citation
-        if citation in seen:
-            continue
-        seen.add(citation)
-        deduped.append(hit)
-    return deduped
+def _shorten(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}{_TOOL_OUTPUT_TRUNCATION_MARKER}"
 
 
-def _build_retrieval_context(question: str, deps: RagDeps) -> tuple[str, list[SearchHit]]:
-    ctx = cast(RunContext[RagDeps], _ContextProxy(deps=deps))
-    combined_hits: list[SearchHit] = []
+def run_qmd_action(
+    ctx: RunContext[RagDeps],
+    command: QmdCommand,
+    argument: str,
+    line_limit: int | None = None,
+) -> _QmdToolResult:
+    """Run qmd against the notes collection and return the tool output."""
+    output = run_qmd_tool(ctx, command=command, argument=argument, line_limit=line_limit)
+    return _QmdToolResult(
+        command=command,
+        argument=argument,
+        line_limit=line_limit,
+        output=_shorten(output, _MAX_TOOL_OUTPUT_CHARS),
+    )
 
-    for search_fn in (semantic_search, rg_search):
-        try:
-            combined_hits.extend(search_fn(ctx, query=question, max_results=DEFAULT_MAX_RESULTS))
-        except Exception:
-            continue
 
-    hits = _dedupe_hits(combined_hits)[:DEFAULT_MAX_RESULTS]
-    if not hits:
-        return "", []
+def finish_tooling(reason: str = "") -> _ToolingComplete:
+    """Finish retrieval and continue with final answer generation."""
+    return _ToolingComplete(reason=reason.strip())
 
-    hit_lines = "\n".join(f"- {hit.citation}: {hit.snippet}" for hit in hits)
 
-    file_sections: list[str] = []
-    seen_paths: set[str] = set()
-    for hit in hits:
-        path_text = hit.path.as_posix()
-        if path_text in seen_paths:
-            continue
-        seen_paths.add(path_text)
-        try:
-            excerpt = read_file(ctx, file_path=path_text, max_chars=DEFAULT_FILE_CHARS)
-        except Exception:
-            continue
-        file_sections.append(f"### {path_text}\n{excerpt}")
-        if len(file_sections) >= DEFAULT_MAX_FILES:
+def _render_command_line(observation: _QmdToolResult) -> str:
+    command = f"qmd {observation.command} {observation.argument!r}"
+    if observation.line_limit is not None:
+        command += f" -l {observation.line_limit}"
+    command += " --collection notes"
+    return command
+
+
+def _build_tool_planning_prompt(question: str, observations: list[_QmdToolResult]) -> str:
+    if not observations:
+        return (
+            "Plan retrieval for the question below.\n"
+            "Call `run_qmd_action` to gather evidence, or `finish_tooling` when evidence is sufficient.\n"
+            "Prefer as few tool calls as needed.\n\n"
+            f"Question:\n{question}\n\n"
+            "qmd help:\n"
+            "```ascii\n"
+            f"{QMD_HELP}\n"
+            "```"
+        )
+
+    rendered_observations = "\n\n".join(
+        (
+            f"Observation {index}:\n"
+            f"Command: {_render_command_line(observation)}\n"
+            f"Output:\n{observation.output}"
+        )
+        for index, observation in enumerate(observations, start=1)
+    )
+
+    return (
+        "Continue retrieval planning for the question below.\n"
+        "If current evidence is enough, call `finish_tooling`.\n"
+        "Otherwise call `run_qmd_action` exactly once for the next best retrieval step.\n\n"
+        f"Question:\n{question}\n\n"
+        f"Current observations:\n{rendered_observations}"
+    )
+
+
+def _build_final_prompt(question: str, observations: list[_QmdToolResult]) -> str:
+    if not observations:
+        return question
+
+    rendered_observations = "\n\n".join(
+        (f"Command: {_render_command_line(observation)}\nOutput:\n{observation.output}")
+        for observation in observations
+    )
+
+    return (
+        "Use the qmd retrieval context below to answer the user question.\n"
+        "Base claims on that evidence and include citations in `path:line` form when present.\n\n"
+        f"Question:\n{question}\n\n"
+        f"qmd retrieval context:\n{rendered_observations}"
+    )
+
+
+async def _collect_tool_observations(
+    question: str,
+    deps: RagDeps,
+    model: str,
+    max_tokens: int,
+) -> list[_QmdToolResult]:
+    agent = build_planning_agent(model=model)
+    observations: list[_QmdToolResult] = []
+    planning_prompt = _build_tool_planning_prompt(question, observations)
+
+    for _ in range(_MAX_TOOL_STEPS):
+        planning_result = await agent.run(
+            planning_prompt,
+            deps=deps,
+            output_type=PromptedOutput(
+                [run_qmd_action, finish_tooling],
+                name="retrieval_step",
+                description="Run one qmd command or finish retrieval.",
+            ),
+            instructions=(
+                "This run is for retrieval planning only. "
+                "Do not answer the user question directly. "
+                "Choose either `run_qmd_action` or `finish_tooling`."
+            ),
+            model_settings=ModelSettings(
+                extra_body={"max_tokens": min(max_tokens, _MAX_TOOL_PLANNING_TOKENS)}
+            ),
+        )
+
+        step_output = cast(ToolingStep, planning_result.output)
+
+        if isinstance(step_output, _ToolingComplete):
             break
 
-    context_parts = [f"Repository search hits:\n{hit_lines}"]
-    if file_sections:
-        context_parts.append("Repository file excerpts:\n" + "\n\n".join(file_sections))
-    return "\n\n".join(context_parts), hits
+        observations.append(step_output)
+        planning_prompt = _build_tool_planning_prompt(question, observations)
 
-
-def _augment_question(question: str, retrieval_context: str) -> str:
-    if not retrieval_context:
-        return question
-    return (
-        "Use the retrieved repository context below to answer the user question.\n\n"
-        f"Question:\n{question}\n\n"
-        f"{retrieval_context}\n\n"
-        "Cite evidence with `path:line` when possible.\n"
-        "Return only the final answer and do not include reasoning steps."
-    )
+    return observations
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -171,7 +237,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--max-tokens",
         type=int,
         default=_env_int("RAG_MAX_TOKENS", DEFAULT_MAX_TOKENS),
-        help="Maximum generated tokens (default: 2048 or RAG_MAX_TOKENS)",
+        help=f"Maximum generated tokens (default: {DEFAULT_MAX_TOKENS} or RAG_MAX_TOKENS)",
     )
     return parser
 
@@ -182,9 +248,10 @@ async def _run_stream(
     model: str,
     max_tokens: int,
 ) -> int:
+    observations = await _collect_tool_observations(question, deps, model, max_tokens)
+
     agent = build_agent(model=model)
-    retrieval_context, hits = _build_retrieval_context(question, deps)
-    prompt = _augment_question(question, retrieval_context)
+    prompt = _build_final_prompt(question, observations)
     sanitizer = _StreamChunkSanitizer()
 
     async with agent.run_stream(
@@ -201,9 +268,6 @@ async def _run_stream(
     if tail:
         print(tail, end="", flush=True)
     print()
-    citations = render_citations(hits)
-    if citations:
-        print(citations, end="")
     return 0
 
 

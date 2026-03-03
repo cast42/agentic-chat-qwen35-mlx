@@ -7,21 +7,28 @@ from pydantic_ai import Agent
 
 from rag_agent.deps import RagDeps
 from rag_agent.models import SearchHit
-from rag_agent.tools.search import citations_for_hits
+from rag_agent.tools.search import QMD_HELP, citations_for_hits
 
 if TYPE_CHECKING:
     from mlx.nn.layers.base import Module as MlxModule
     from pydantic_ai.models import Model
     from transformers import PreTrainedTokenizer
 
-DEFAULT_MODEL = "mlx-community/Qwen3-4B-Thinking-2507-4bit"
+DEFAULT_MODEL = "mlx-community/Qwen3.5-9B-4bit"
 _TOKENIZER_CONFIG = {"eos_token": "<|endoftext|>", "trust_remote_code": True}
 
-SYSTEM_PROMPT = """
+SYSTEM_PROMPT = f"""
 You are a local agentic RAG assistant over a markdown notes repository.
 
+Tool retrieval is done through qmd planning steps, and tool outputs are provided in the conversation context.
+Treat those qmd outputs as your primary evidence.
+
+qmd help:
+```ascii
+{QMD_HELP}
+```
+
 Rules:
-- Use retrieved repository context included with the user message as primary evidence.
 - Include citations in the final answer using `path:line` format whenever evidence exists.
 - If the provided context is insufficient, say so explicitly.
 - Respond with only the final answer, never your reasoning process or planning steps.
@@ -94,4 +101,15 @@ def build_agent(model: str = DEFAULT_MODEL) -> Agent[RagDeps, str]:
         model=_build_local_mlx_model(model),
         deps_type=RagDeps,
         system_prompt=SYSTEM_PROMPT,
+    )
+
+
+def build_planning_agent(model: str = DEFAULT_MODEL) -> Agent[RagDeps, str]:
+    """Build a planning agent without a system prompt.
+
+    This avoids multiple `system` role messages when using PromptedOutput with Outlines.
+    """
+    return Agent(
+        model=_build_local_mlx_model(model),
+        deps_type=RagDeps,
     )

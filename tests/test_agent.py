@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import rag_agent.agent as agent_module
-from rag_agent.agent import DEFAULT_MODEL, render_citations
+from rag_agent.agent import DEFAULT_MODEL, SYSTEM_PROMPT, render_citations
 from rag_agent.cli import _StreamChunkSanitizer, _build_parser
 from rag_agent.models import SearchHit
 
@@ -21,8 +21,14 @@ def test_render_citations_formats_sources_block() -> None:
     assert "- b.md:9" in rendered
 
 
-def test_default_model_matches_expected_qwen3_4b_variant() -> None:
-    assert DEFAULT_MODEL == "mlx-community/Qwen3-4B-Thinking-2507-4bit"
+def test_default_model_matches_expected_qwen35_9b_variant() -> None:
+    assert DEFAULT_MODEL == "mlx-community/Qwen3.5-9B-4bit"
+
+
+def test_system_prompt_includes_qmd_help() -> None:
+    assert "qmd query" in SYSTEM_PROMPT
+    assert "qmd search" in SYSTEM_PROMPT
+    assert "qmd multi-get" in SYSTEM_PROMPT
 
 
 def test_cli_uses_default_model_when_env_not_set(monkeypatch) -> None:
