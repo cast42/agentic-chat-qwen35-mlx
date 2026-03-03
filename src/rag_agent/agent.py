@@ -29,9 +29,12 @@ qmd help:
 ```
 
 Rules:
+- Stream your reasoning inside `<think>...</think>` tags.
+- After the `</think>` block, provide the final answer in Markdown.
+- Convert `qmd://notes/...` references to Markdown links using `https://github.com/cast42/notes/blob/main/...` URLs.
+- Convert `notes/...` path references to Markdown links using `https://github.com/cast42/notes/blob/main/...` URLs.
 - Include citations in the final answer using `path:line` format whenever evidence exists.
 - If the provided context is insufficient, say so explicitly.
-- Respond with only the final answer, never your reasoning process or planning steps.
 """.strip()
 
 

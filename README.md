@@ -34,6 +34,9 @@ just run "Di una frase corta en espanol."
 just run "What did I write about agentic coding?"
 ```
 
+After the first answer, the CLI stays in a follow-up loop. Type `quit` (or press
+`Ctrl-C`) to exit.
+
 The agent can run tools against the notes collection via `qmd`:
 
 ```ascii
@@ -41,7 +44,7 @@ qmd query "question" --collection notes              # Auto-expand + rerank
 qmd query $'lex: X\nvec: Y' --collection notes       # Structured
 qmd query $'expand: question' --collection notes     # Explicit expand
 qmd search "keywords" --collection notes             # BM25 only (no LLM)
-qmd get "#abc123" --collection notes                 # By docid
+qmd get "#abc123" --collection notes --json          # By docid (markdown payload)
 qmd multi-get "journals/2026-*.md" -l 40 --collection notes  # Batch pull snippets by glob
 qmd multi-get notes/foo.md,notes/bar.md --collection notes   # Comma-separated list, preserves order
 ```
